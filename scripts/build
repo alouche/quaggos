@@ -1,0 +1,68 @@
+#!/usr/bin/perl -w
+#
+# quaggOS build script
+#
+
+use strict;
+
+my $build_top_dir = "/root/quaggOS";
+my $real_root = "$build_top_dir/real_root";
+
+die ("Build top dir does not exists!") unless ( -e $build_top_dir );
+
+setenv(); mountfs(); installpkgs(); kernelbuild(); bootsetup(); setupiso();
+
+sub setenv {
+  system("mkdir -p $build_top_dir/boot $real_root/{var/{lib/{pacman,dbus},cache/pacman/pkg,run},dev,proc,sys,etc/pacman.d,root,tmp} $build_top_dir/squashmod $build_top_dir/mkinitrd $build_top_dir/iso");
+}
+
+sub mountfs {
+  system("mount -t sysfs sysfs $real_root/sys");
+  system("mount -t proc proc $real_root/proc");
+  system("mount -o bind /dev $real_root/dev");
+  system("mount -t tmpfs shm $real_root/dev/shm");
+  system("mount -t devpts devpts $real_root/dev/pts");
+  system("mount --bind /var/run $real_root/var/run");
+}
+
+sub installpkgs {
+  system("pacman --root $real_root/ --noconfirm -Sfy base squashfs-tools aufs2");
+}
+
+sub kernelbuild {
+  system("sed -i s/autodetect/'usb lvm2'/ $real_root/etc/mkinitcpio.conf");
+  system("sed -i s/'MODULES=\"\"'/'MODULES=\"aufs squashfs loop\"'/ $real_root/etc/mkinitcpio.conf");
+  system("pacman --root $real_root/ --noconfirm -Sy kernel26");
+}
+
+sub bootsetup {
+  system("cp -rf $real_root/boot/* $build_top_dir/boot");
+  system("cp $real_root/usr/lib/grub/i386-pc/stage2_eltorito $build_top_dir/boot/grub/");
+  system("rm $build_top_dir/boot/kernel26-fallback.img");
+  system("mkdir $build_top_dir/boot/ramfs -p");
+  system("gzip -d $build_top_dir/boot/kernel26.img -c > $build_top_dir/boot/ramfs/_cpio");
+  system("rm $build_top_dir/boot/kernel26.img");
+  system("cd $build_top_dir/boot/ramfs;bsdtar -x -f _cpio; rm _cpio;");
+  system("cp -f $build_top_dir/init $build_top_dir/boot/ramfs/");
+  system("cd $build_top_dir/boot/ramfs; find . | cpio -H newc -o | gzip > $build_top_dir/boot/initrd.cpio.igz");
+  system("rm -rf $build_top_dir/boot/ramfs");
+  system("rm $build_top_dir/boot/grub/menu.lst");
+  system("echo 'timeout 5' >> $build_top_dir/boot/grub/menu.lst");
+  system("echo 'default 0' >> $build_top_dir/boot/grub/menu.lst");
+  system("echo 'title quaggOS' >> $build_top_dir/boot/grub/menu.lst");
+  system("echo 'kernel  /boot/vmlinuz26 quiet ro' >> $build_top_dir/boot/grub/menu.lst");
+  system("echo 'initrd  /boot/initrd.cpio.igz' >> $build_top_dir/boot/grub/menu.lst");
+}
+
+sub setupiso {
+  system("cp $build_top_dir/boot $build_top_dir/iso -rf");
+  system("umount $real_root/sys");
+  system("umount $real_root/proc/");
+  system("umount $real_root/dev/shm/");
+  system("umount $real_root/dev/pts/");
+  system("umount $real_root/var/run/");
+  system("umount $real_root/dev");
+  system("mksquashfs $real_root $build_top_dir/root.squashfs -always-use-fragments");
+  system("mv $build_top_dir/root.squashfs $build_top_dir/iso/root.squashfs");
+  system("cd $build_top_dir && genisoimage -R -b boot/grub/stage2_eltorito -no-emul-boot -boot-load-size 4 -boot-info-table -o $build_top_dir/quaggOS.iso $build_top_dir/iso");
+}

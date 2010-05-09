@@ -1,0 +1,12 @@
+[
+  http://quaggOS.org
+  https://code.google.com/p/quaggos
+]
+
+
+Install build system
+
+1. Basic Archlinux Install
+2. pacman -S mkisolinux squashfs-tools cdrkit cpio
+3. 
+

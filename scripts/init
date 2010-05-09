@@ -1,0 +1,220 @@
+#!/bin/bash
+
+###!/bin/busybox ash
+/bin/busybox --install -s
+
+. /init_functions
+
+echo ":: Booting initramfs"
+
+/bin/mount -t proc proc /proc
+/bin/mount -t sysfs sys /sys
+
+if grep -q devtmpfs /proc/filesystems 2>/dev/null; then
+  /bin/mount -n -t devtmpfs udev /dev -o mode=0755,size=10M,nosuid
+else
+  /bin/mount -n -t tmpfs udev /dev -o mode=0755,size=10M,nosuid
+  # We don't have devtmpfs, so add the most important standard devices
+  /bin/mknod /dev/null c 1 3
+  /bin/mknod /dev/zero c 1 5
+  /bin/mknod /dev/console c 5 1
+  # /dev/mem is needed if we want to load uvesafb before triggering uevents
+  /bin/mknod /dev/mem c 1 1
+fi
+
+read CMDLINE </proc/cmdline
+export CMDLINE
+
+export root=""
+export init=""
+echo "/sbin/modprobe" > /proc/sys/kernel/modprobe
+
+# set default mount handler
+mount_handler="default_mount_handler"
+
+# if available, start udevd at this stage
+if [ -x /sbin/udevd ]; then
+    echo ":: Starting udevd..."
+    echo > /proc/sys/kernel/hotplug
+    /sbin/udevd --daemon --resolve-names=never
+    export udevd_running=1
+    echo "done."
+else
+    export udevd_running=0
+fi
+
+for cmd in ${CMDLINE}; do
+    case "${cmd}" in
+        \#*) break ;; # ignore everything after a # in the commandline
+        # The kernel passes those to the kernel on its own
+        [0123456Ss]) ;;
+        [0-9]*) ;;
+        single) ;;
+        rw) readwrite="yes" ;;
+        ro) readwrite="no" ;;
+        # only export stuff that does work with ash :)
+        *=*) rhs="$(echo "${cmd}" | cut -d= -f2-)"
+             cmd="$(echo "${cmd}" | cut -d= -f1 | sed 's|\.|_|g')"
+             cmd="$(echo "${cmd}" | sed 's|-|_|g')=${rhs}"
+             (echo "${cmd}" | grep -qe '^[0-9]') || export "${cmd}"
+             ;;
+        *)   cmd="$(echo "${cmd}" | sed 's|\.|_|g')"
+             cmd="$(echo "${cmd}" | sed 's|-|_|g')"
+             (echo "${cmd}" | grep -qe '^[0-9]') || export "${cmd}=y"
+             ;;
+    esac
+done
+
+if [ -n "${disablehooks}" ]; then
+    for d in $(echo "${disablehooks}" | sed 's|,| |g'); do
+        export "hook_${d}=disabled"
+    done
+fi
+
+if [ -n "${disablemodules}" ]; then
+    for d in $(echo "${disablemodules}" | sed 's|,| |g'); do
+        export "mod_${d}=disabled"
+    done
+fi
+
+if [ -n "${earlymodules}" ]; then
+    for m in $(echo "${earlymodules}" | sed 's|,| |g'); do
+        /sbin/modprobe -q ${m} > /dev/null 2>&1
+    done
+fi
+
+. /config
+
+for m in ${MODULES}; do
+    TST=""
+    eval "TST=\$mod_${m}"
+    if [ "${TST}" != "disabled" ]; then
+        /sbin/modprobe -q ${m} > /dev/null 2>&1
+    fi
+done
+
+# If rootdelay is empty or not a non-negative integer, set it to 10
+if [ -z "${rootdelay}" ] || ! [ "${rootdelay}" -ge 0 ]; then
+    export rootdelay=10
+fi
+
+if [ -e "/hooks" ]; then
+    for h in ${HOOKS}; do
+        TST=""
+        eval "TST=\$hook_${h}"
+        if [ "${TST}" != "disabled" ]; then
+            run_hook () { echo "${h}: no run function defined"; }
+            if [ -e "/hooks/${h}" ]; then
+               . /hooks/${h}
+               echo ":: Running Hook [${h}]"
+               run_hook
+            fi
+        fi
+    done
+fi
+
+if [ "${break}" = "y" ]; then
+    echo ":: Break requested, type 'exit' to resume operation"
+    launch_interactive_shell
+fi
+
+for i in ${CMDLINE}
+ do
+  if [ "$i" = "droptoshell" ]
+   then
+    echo "droping to shell as requested by user through kernel argument"
+    launch_interactive_shell --exec
+  elif [ "${i:0:9}" = "userroot=" ]
+   then
+   NODES=`cut $i -d= -f2`
+  fi 
+done
+mkdir -p /mnt/live_root             #root fs
+mkdir -p /mnt/live_cdrom
+mkdir -p /mnt/tmpfs
+mkdir -p /mnt/unionfs
+mkdir -p /mnt/modules
+mount -t tmpfs -o none /mnt/tmpfs || ( echo "mounting ramfs_tmp failed. Dropping to shell" && launch_interactive_shell --exec )
+modprobe loop
+FS="auto iso9660 ext4 ext3 ext2"
+if [ -z "$NODES" ]
+then 
+NODES=`ls /dev/cd*` 2>/dev/null
+NODES="$NODES `ls /dev/h*`" 2>/dev/null
+NODES="$NODES `ls /dev/s*`" 2>/dev/null
+NODES="$NODES `ls /dev/m*`" 2>/dev/null
+fi
+
+for __nodes in $NODES do
+  if [ -b $__nodes ] then
+    if ( mount $__nodes /mnt/live_cdrom -o ro 2>/dev/null ) then
+      if [ -e /mnt/live_cdrom/root.squashfs ] then
+        mount /mnt/live_cdrom/root.squashfs /mnt/live_root -o loop,ro || (echo "failed, continueing"; continue; )
+        mount -t aufs -o "br:/mnt/tmpfs:/mnt/live_root" none /mnt/unionfs || (echo "failed, continueing"; continue; )
+        for mod in /mnt/live_cdrom/squashmod/* do
+          if [ -f $mod ] then
+            mkdir "/mnt/`echo $mod | cut -d/ -f 5`" -p && mount "$mod" "/mnt/`echo $mod | cut -d/ -f 5`" -o loop,ro && mount -o "remount,append:/mnt/`echo $mod | cut -d/ -f 5`" /mnt/unionfs
+          fi
+        done
+        NODES=`ls /dev/h*` 2>/dev/null
+        NODES="$NODES `ls /dev/s*`" 2>/dev/null
+        NODES="$NODES `ls /dev/m*`" 2>/dev/null	
+        for sw in $NODES do
+          if [ -b $sw ] then
+            swapon $sw 2>/dev/null && echo "$sw		none	swap	sw	0 0" >> /mnt/unionfs/etc/fstab && swapoff $sw && echo "using swap on $sw" 
+          fi
+        done
+        for real_dir in /mnt/unionfs/* do
+          if [ -f $real_dir ] then
+            ln -s "$real_dir" "/`echo $real_dir | cut -d/ -f4`"
+          elif [ -d $real_dir ] then
+            echo " trying $real_dir for binding"
+            if [ "$real_dir" = "/mnt/unionfs/dev" ] then
+              continue
+            fi
+		        if [ "$real_dir" = "/mnt/unionfs/proc" ] then
+		          continue
+		        fi
+		        if [ "$real_dir" = "/mnt/unionfs/sys" ] then
+		          continue
+		        fi
+            if [ "$real_dir" = "/mnt/unionfs/mnt" ] then
+              continue
+            fi
+            if [ -d "/`echo $real_dir | cut -d/ -f4`" ] then
+              echo folder "/`echo $real_dir | cut -d/ -f4` exist"
+            else
+              echo "mkdir /`echo $real_dir | cut -d/ -f4`"
+              mkdir -p "/`echo $real_dir | cut -d/ -f4`"
+            fi
+		          echo "mounting $real_dir on `echo $real_dir | cut -d/ -f4`"
+		          mount --bind "$real_dir" "/`echo $real_dir | cut -d/ -f4`"
+          fi
+        done
+	      #Special handling if udev is running
+        udevpid=$(/bin/pidof udevd)
+        if [ -n "${udevpid}" ]; then
+          # Settle pending uevents, then kill udev
+          /sbin/udevadm settle
+          /bin/kill ${udevpid} > /dev/null 2>&1
+          while /bin/pidof udevd >/dev/null; do
+            sleep 0.1
+          done
+        fi
+        # done with Special handling if udev is running
+	      rm -f /config
+	      rm -f /init
+	      rm -f /init_functions
+        rm -rf /hooks
+	      exec /sbin/init
+	      break;
+	    else 
+	      echo image not found
+	    fi
+	    umount /mnt/live_cdrom || ( sleep 1 && umount /mnt/live_cdrom || echo not um)
+	    break
+    fi
+  fi
+done
+
+launch_interactive_shell --exec

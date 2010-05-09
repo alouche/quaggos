@@ -1,0 +1,9 @@
+#!/usr/bin/env perl
+
+my $buildir = "/root/quaggOS";
+
+sub setupenv {
+  die ("workdir does not exists!") unless ( -e "$buildir/real_root" );
+  system ("mkdir -p boot real_root/{var/{lib/{pacman,dbus},cache/pacman/pkg,run},dev,proc,sys,etc/pacman.d,root,tmp}");
+
+}
